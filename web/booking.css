@@ -1,0 +1,103 @@
+.back-link { color: var(--muted); text-decoration: none; font-size: .85rem; }
+.back-link:hover { text-decoration: underline; }
+.booking-page-title { margin: 12px 0 21px; font-size: clamp(1.85rem, 4vw, 2.7rem); }
+.map-column { min-width: 0; }
+.seat-map { padding: clamp(13px, 3vw, 23px); border: 1px solid var(--line); border-radius: 16px; background: #fff; }
+.map-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 14px; }
+.map-hint { margin-top: 4px; color: var(--muted); font-size: .85rem; }
+.legend { display: flex; flex-wrap: wrap; gap: 12px; color: var(--muted); font-size: .76rem; }
+.legend span { display: flex; align-items: center; gap: 5px; }
+.legend i { width: 10px; height: 10px; border-radius: 2px; }
+.legend-available { background: #a43f7b; }
+.legend-booked { background: #a6a3ab; }
+.map-status, .availability-error { color: var(--muted); font-size: .82rem; }
+.map-status:not(:empty), .availability-error:not(:empty) { margin-top: 8px; }
+.availability-error { color: var(--accent-strong); }
+.booking-concert { margin-bottom: 8px; font-weight: 800; }
+.selection { margin-top: 16px; padding: 12px 0 8px; border-top: 1px solid var(--line); }
+.seat-summary { color: var(--muted); font-size: .85rem; }
+.seat-price { margin-top: 3px; font-weight: 800; font-size: 1.28rem; }
+
+.arena-scroll { width: 100%; overflow-x: auto; border-radius: 10px; }
+.arena {
+  position: relative;
+  width: 100%;
+  min-width: 540px;
+  aspect-ratio: 544 / 367;
+  overflow: hidden;
+  background: #747474;
+  container-type: inline-size;
+}
+.arena-outline, .arena-floor {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.arena-outline {
+  background: #dedede;
+  clip-path: polygon(17% 12.3%, 27% 15%, 39% 17%, 50% 17.6%, 61% 17%, 73% 15%, 82.5% 12.3%,
+    100% 51.3%, 94.4% 54.7%, 97.8% 61.4%, 97.8% 84%, 89% 87.5%, 78% 90.3%, 64% 93%, 50% 94%,
+    36% 93%, 22% 90.3%, 11% 87.5%, 2.1% 84%, 2.1% 61.4%, 5.6% 54.7%, 0 51.3%);
+}
+.arena-floor {
+  background: #fff;
+  clip-path: polygon(18% 14%, 27% 16.5%, 39% 18.5%, 50% 19%, 61% 18.5%, 73% 16.5%, 81.8% 14%,
+    98.3% 50.5%, 92.8% 54%, 96.8% 62.4%, 96.8% 83%, 89% 86.2%, 78% 89%, 64% 91.6%, 50% 92.5%,
+    36% 91.6%, 22% 89%, 11% 86.2%, 3.1% 83%, 3.1% 62.4%, 7.2% 54%, 1.7% 50.5%);
+}
+.stage {
+  position: absolute; inset: 1.5% 20% auto; height: 13%;
+  display: grid; place-items: start center; padding-top: 1%;
+  border-bottom: .85cqw solid #e5e5e5;
+  border-radius: 0 0 50% 50% / 0 0 60% 60%;
+  color: #f2f2f2; font-size: 4.3cqw; font-weight: 800;
+}
+.floor-label {
+  position: absolute; left: 49.6%; top: 87%;
+  transform: translate(-50%, -50%);
+  display: grid; place-items: center; width: 2.7%; aspect-ratio: 1;
+  border-radius: 50%; background: #171717; color: #fff;
+  font-size: 1.7cqw; font-weight: 750;
+}
+.accessible-marker {
+  position: absolute; transform: translate(-50%, -50%);
+  color: #727272; font-family: "Segoe UI Symbol", sans-serif; font-size: 2.1cqw;
+  line-height: 1; pointer-events: none;
+}
+.arena button.seat {
+  position: absolute;
+  width: 1.4%;
+  min-height: 0;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 0;
+  border-radius: 13%;
+  background: var(--seat-color);
+}
+.seat-purple { --seat-color: #7964ee; }
+.seat-green { --seat-color: #079e19; }
+.seat-blue { --seat-color: #03a9ef; }
+.arena button.seat-booked:disabled { --seat-color: #a6a3ab; opacity: 1; cursor: default; }
+.arena button.seat:enabled:hover, .arena button.seat:enabled:focus-visible,
+.arena button.seat[aria-pressed="true"]:enabled {
+  z-index: 1;
+  outline: 2px solid #24192a;
+  outline-offset: 1px;
+}
+
+
+.checkout { max-width: 540px; }
+.checkout-summary, .checkout-timer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.checkout-summary { padding: 4px 0 14px; border-bottom: 1px solid var(--line); }
+.checkout-timer { margin: 14px 0; color: var(--accent-strong); font-size: .86rem; }
+.checkout-timer strong { font-size: 1.15rem; font-variant-numeric: tabular-nums; }
+.checkout-fields { display: grid; gap: 12px; }
+.checkout-actions { display: grid; grid-template-columns: 1fr 1.4fr; gap: 10px; margin-top: 20px; }
+.checkout-actions .action-reserve { margin-top: 0; }
+.checkout-actions button { min-height: 48px; }
+.checkout-complete { display: grid; gap: 14px; margin-top: 16px; }
