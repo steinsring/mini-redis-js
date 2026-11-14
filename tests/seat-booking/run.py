@@ -76,10 +76,10 @@ class TestServer:
         store.seats = ObservedSeats(store.seats, self.lookups)
         save = store._save
 
-        def save_to_disk(reservations):
+        def save_to_disk(records):
             if self.fail_save:
                 raise OSError("Test fixture: disk save failed")
-            save(reservations)
+            save(records)
 
         store._save = save_to_disk
         return store
@@ -142,6 +142,8 @@ class TestServer:
                 "processed": self.processed,
                 "seats": list(self.store.seats),
                 "reserved": self.store.booked_seats(),
+                "holds": [{"token": hold.token, "seat": hold.seat_number, "user": hold.user_id,
+                           "expiresAt": hold.expires_at} for hold in self.store.holds.values()],
                 "saved": json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {},
                 "colors": {color: next(str(i) for i, seat in enumerate(layout["seats"], 1) if seat[2] == color)
                            for color in ("purple", "green", "blue")},
@@ -203,7 +205,7 @@ async def chrome_report(test, port, profile):
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
     try:
-        await asyncio.wait_for(test.finished.wait(), timeout=70)
+        await asyncio.wait_for(test.finished.wait(), timeout=120)
         return test.report
     except TimeoutError as error:
         raise RuntimeError(f"Chrome completed {len(test.report)} scenarios before timing out") from error
@@ -257,7 +259,7 @@ async def main():
                 await test.stop_storage()
 
     expected = [f"{group}-{number:02d}" for group, count in
-                (("SEAT", 4), ("BOOK", 3), ("HOLD", 4), ("DONE", 4))
+                (("SEAT", 4), ("BOOK", 3), ("HOLD", 4), ("DONE", 4), ("HIST", 6), ("EXP", 9))
                 for number in range(1, count + 1)]
     if [entry["id"] for entry in report] != expected:
         raise RuntimeError(f"Incomplete scenario report: {report}")

@@ -10,9 +10,11 @@
 
   const fetchOriginal = window.fetch.bind(window);
   window.fetch = async (input, options) => {
-    const path = new URL(input instanceof Request ? input.url : input, location.href).pathname;
+    const url = new URL(input instanceof Request ? input.url : input, location.href);
+    const path = url.pathname;
     if (!path.startsWith('/api/')) return fetchOriginal(input, options);
-    const record = { page: location.pathname, path, method: options?.method ?? 'GET' };
+    const record = { page: location.pathname, path, method: options?.method ?? 'GET',
+      userId: url.searchParams.get('user_id') };
     test.requests.push(record);
     const response = await fetchOriginal(input, options);
     record.status = response.status;

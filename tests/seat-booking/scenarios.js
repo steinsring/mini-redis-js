@@ -363,4 +363,183 @@ await test('DONE-04', async () => {
   return '같은 ID의 다른 좌석 요청이 거부됐고 첫 좌석 JSON 기록만 유지';
 });
 
+async function lookupHistory(page, user, expected) {
+  const before = page.requests.length;
+  page.doc().getElementById('user-id').value = user;
+  page.button('예매 내역 조회').click();
+  const request = await waitFor(() => page.requests.slice(before).find(record =>
+    record.path === '/api/reservations' && record.body !== undefined), '예매 내역 응답');
+  await waitFor(() => page.text('.history [role="status"]') === expected, '예매 내역 화면 표시');
+  return request;
+}
+
+await test('HIST-01', async () => {
+  equal((await complete(await makeHold(1, 'user-A'))).status, 200, '예매 준비');
+  await lookupHistory(await booking(), 'user-A', '1번');
+  return '예매 내역 조회 버튼을 누르면 1번이 표시됨';
+});
+
+await test('HIST-02', async () => {
+  equal((await complete(await makeHold(1, 'user-A'))).status, 200, 'A 예매 준비');
+  equal((await complete(await makeHold(10, 'user-B'))).status, 200, 'B 예매 준비');
+  const page = await booking();
+  const a = await lookupHistory(page, 'user-A', '1번');
+  const b = await lookupHistory(page, 'user-B', '10번');
+  equal([a.userId, b.userId], ['user-A', 'user-B'], '요청의 사용자 ID');
+  equal([a.body, b.body], [['1'], ['10']], '사용자별 예매 좌석');
+  return '입력한 ID를 전달하고 각 사용자의 좌석만 표시함';
+});
+
+await test('HIST-03', async () => {
+  equal((await complete(await makeHold(1, 'user-A'))).status, 200, '예매 준비');
+  const request = await lookupHistory(await booking(), 'user-A', '1번');
+  equal([request.method, request.status, request.body], ['GET', 200, ['1']], '예매 내역 응답');
+  return 'HTTP 200과 좌석 번호 배열 ["1"] 반환';
+});
+
+await test('HIST-04', async () => {
+  equal((await complete(await makeHold(1, 'user-A'))).status, 200, '예매 준비');
+  const page = await booking();
+  await lookupHistory(page, 'user-A', '1번');
+  const request = await lookupHistory(page, 'user-C', '예매 내역이 없습니다.');
+  equal([request.status, request.body], [200, []], '예매 기록 없는 사용자');
+  return '빈 배열을 반환하고 이전 좌석 표시를 빈 내역 안내로 교체함';
+});
+
+await test('HIST-05', async () => {
+  const token = await makeHold(1, 'user-A');
+  const page = await booking();
+  const held = await lookupHistory(page, 'user-A', '예매 내역이 없습니다.');
+  equal(held.body, [], '임시 점유 중 응답');
+  equal((await complete(token)).status, 200, '예매 완료');
+  const reserved = await lookupHistory(page, 'user-A', '1번');
+  equal(reserved.body, ['1'], '예매 완료 후 응답');
+  return '임시 점유는 제외하고 완료한 좌석만 반환함';
+});
+
+await test('HIST-06', async () => {
+  const page = await booking();
+  const before = page.requests.length;
+  for (const invalid of ['', '   ']) {
+    page.doc().getElementById('user-id').value = invalid;
+    page.button('예매 내역 조회').click();
+    equal(page.text('.history [role="status"]'), '사용자 ID를 입력하세요.', '필수 입력 안내');
+  }
+  equal(page.requests.length - before, 0, '빈 값과 공백의 추가 요청');
+  return '빈 값과 공백 모두 안내 표시, 서버 요청 0건';
+});
+
+const holdStatus = token => api('/api/holds', { headers: { 'X-Hold-Token': token } });
+const cancelHold = token => api('/api/holds', { method: 'DELETE', headers: { 'X-Hold-Token': token } });
+
+async function openHeldCheckout(token) {
+  const page = open('/checkout#' + token);
+  await waitFor(() => page.path() === '/checkout' && page.text('[role=timer]'), '기존 점유 입력 페이지');
+  return page;
+}
+
+await test('EXP-01', async () => {
+  await control({ clock: 42 });
+  const token = await makeHold(1, 'user-A');
+  equal((await state()).holds, [{ token, seat: '1', user: 'user-A', expiresAt: 342 }], '점유 레코드와 만료 시각');
+  return '좌석·사용자·토큰과 T+300초 만료 시각이 저장됨';
+});
+
+await test('EXP-02', async () => {
+  const token = await makeHold(1, 'user-A');
+  const before = (await state()).holds;
+  await control({ clock: 10 });
+  const page = await openHeldCheckout(token);
+  equal([page.text('[role=timer]'), page.token()], ['04:50', token], '10초 뒤 첫 화면');
+  await control({ clock: 30 });
+  page.frame.contentWindow.location.reload();
+  await waitFor(() => page.text('[role=timer]') === '04:30', '새로고침 후 남은 시간');
+  const after = await state();
+  equal([page.token(), after.holds, commands(after, 'queued', 'HOLD').length], [token, before, 1], '같은 점유를 유지');
+  return '입력 페이지에서 04:50, 새로고침 후 04:30 표시. 토큰과 만료 시각 유지';
+});
+
+await test('EXP-03', async () => {
+  const page = await checkout(1, 'user-A');
+  await control({ clock: 299 });
+  page.tick(299);
+  equal(page.text('[role=timer]'), '00:01', '4분 59초의 타이머');
+  equal((await booking()).seat(1).disabled, true, '다른 사용자 화면');
+  const rejected = await hold(1, 'user-B');
+  equal([rejected.status, rejected.data.detail], [400, 'ERR seat unavailable'], '중복 점유');
+  return '00:01까지 유지되고 다른 사용자의 선택과 점유가 차단됨';
+});
+
+await test('EXP-04', async () => {
+  const page = await checkout();
+  const token = page.token();
+  await control({ clock: 300 });
+  page.tick(300);
+  await waitFor(() => page.path() === '/', '5분 만료 후 공연 첫 페이지');
+  for (const response of [await holdStatus(token), await complete(token)]) {
+    equal([response.status, response.data.detail], [410, 'ERR hold expired'], '만료된 토큰 거부');
+  }
+  await makeHold(1, 'user-B');
+  return '300초에 복귀. 이전 토큰의 조회와 완료는 410, 새 점유 성공';
+});
+
+await test('EXP-05', async () => {
+  const first = await makeHold(1, 'user-A');
+  await control({ clock: 60 });
+  const second = await makeHold(10, 'user-B');
+  await control({ clock: 300 });
+  const page = await booking();
+  equal([page.seat(1).disabled, page.seat(10).disabled], [false, true], '좌석별 만료');
+  equal([(await holdStatus(first)).status, (await holdStatus(second)).data.remaining_ms], [410, 60000], '좌석별 남은 시간');
+  return '1번만 해제되고 10번은 60초 남음';
+});
+
+await test('EXP-06', async () => {
+  const first = await makeHold(1, 'user-A');
+  await control({ clock: 120 });
+  equal((await cancelHold(first)).status, 200, '기존 점유 취소');
+  const second = await makeHold(1, 'user-B');
+  await control({ clock: 300 });
+  equal((await state()).holds, [{ token: second, seat: '1', user: 'user-B', expiresAt: 420 }], '취소된 점유 제거와 새 만료 시각');
+  equal((await holdStatus(second)).data.remaining_ms, 120000, '새 점유의 남은 시간');
+  return '취소 후 재점유 가능. 원래 만료 시각에도 새 점유는 120초 남음';
+});
+
+await test('EXP-07', async () => {
+  const first = await makeHold(1, 'user-A');
+  await control({ clock: 299 });
+  equal((await complete(first)).status, 200, '만료 전 예매 완료');
+  await control({ clock: 301 });
+  const page = await booking();
+  equal(page.seat(1).disabled, true, '완료 좌석 비활성 상태');
+  page.seat(1).click();
+  equal(page.requests.filter(record => record.path === '/api/price').length, 0, '완료 좌석 클릭 차단');
+  equal([(await hold(1, 'user-B')).status, (await state()).saved['1']?.user_id], [400, 'user-A'], '완료 상태 보존');
+  return '원래 만료 시각을 지나도 예매 기록과 좌석 차단이 유지됨';
+});
+
+await test('EXP-08', async () => {
+  const first = await makeHold(1, 'user-A');
+  await control({ clock: 300 });
+  const second = await makeHold(1, 'user-B');
+  const before = (await state()).holds;
+  equal((await complete(first)).status, 410, '이전 토큰 완료 요청');
+  await cancelHold(first);
+  equal((await state()).holds, before, '이전 토큰 취소 후 새 점유와 만료 시각');
+  equal([before[0].token, (await holdStatus(second)).status], [second, 200], '현재 토큰의 유효성');
+  return '만료 토큰의 완료·취소 시도에도 새 점유 및 만료 시각 유지';
+});
+
+await test('EXP-09', async () => {
+  const first = await makeHold(1, 'user-A');
+  equal((await complete(await makeHold(10, 'user-B'))).status, 200, '10번 예매 완료');
+  await control({ restart: true });
+  const page = await booking();
+  equal([page.seat(1).disabled, page.seat(10).disabled], [false, true], '재시작 뒤 좌석 상태');
+  equal([(await holdStatus(first)).status, (await complete(first)).status], [410, 410], '이전 토큰 무효');
+  equal((await state()).saved['10']?.user_id, 'user-B', '완료 기록 보존');
+  await makeHold(1, 'user-C');
+  return '재시작 뒤 1번 점유 해제 및 재점유 가능. 완료된 10번은 유지';
+});
+
 await post('/__booking_test/report', { finished: true });
