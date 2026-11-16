@@ -1,74 +1,69 @@
 # mini-redis-js
 
-Krafton Jungle 11–12주차 좌석 예매 프로젝트입니다. mini-react로 좌석 배치와 예매 화면을 렌더링하고, FastAPI가 브라우저의 HTTP 요청을 RESP2 명령으로 변환해 Python asyncio TCP 서버로 전달합니다.
-
-```text
-브라우저 (mini-react) → FastAPI → RESP2 TCP 서버 → 메모리 좌석 테이블
-                                                    └─ 완료 예매 JSON 저장
-```
+Python 표준 라이브러리로 만든 학습용 인메모리 key/value TCP 서버입니다.
+RESP2로 GET, SET, DEL을 처리합니다. 외부 패키지 설치는 필요하지 않습니다.
 
 ## 실행
 
-Python 3.10 이상에서 저장소 루트를 열고 의존성을 설치합니다.
+Python 3.10 이상에서 저장소 루트에서 실행합니다.
 
-```powershell
-python -m pip install -r requirements.txt
-```
-
-터미널 두 개에서 각각 실행합니다.
-
-```powershell
+```sh
 python redis.py
 ```
 
-```powershell
-python -m uvicorn fastapi_server:app --host 127.0.0.1 --port 8000
+기본 주소는 `127.0.0.1:6379`입니다. 별도로 설치한 `redis-cli`로 접속할 수 있습니다.
+
+```sh
+redis-cli SET greeting hello
+redis-cli GET greeting
+redis-cli DEL greeting
 ```
 
-Chrome에서 [공연 상세 페이지](http://127.0.0.1:8000)를 엽니다. TCP 서버는 기본으로 `127.0.0.1:6379`에서 실행됩니다.
-
-## 예매 흐름
-
-1. 공연 상세에서 **예매하기**를 누르면 997석의 좌석 배치도가 열립니다. 보라색은 100,000원, 초록색은 50,000원, 하늘색은 30,000원입니다.
-2. 좌석을 클릭하면 현재 가격을 조회합니다. 임시 점유 중이거나 예매가 완료된 좌석은 선택할 수 없습니다. 화면이 갱신되기 전에 해당 좌석을 클릭하면 안내를 표시하고 전체 좌석 상태를 다시 조회합니다.
-3. 사용자 ID를 입력하고 **예매하기**를 누릅니다. 서버에서 임시 점유에 성공하면 예매 정보 입력 화면으로 이동합니다. 점유에 실패하면 좌석 배치도에서 실패 안내를 확인할 수 있습니다.
-4. 임시 점유는 서버가 점유를 발급한 시점부터 5분간 유효합니다. 이름, 생년월일, 휴대폰 번호를 입력해 예매를 완료합니다. 취소하거나 시간이 만료되면 공연 상세로 돌아가고 좌석은 다시 예매 가능해집니다.
-5. 좌석 배치도에서 사용자 ID를 입력하고 **예매 내역 조회**를 누르면 완료된 좌석 번호가 표시됩니다. 한 ID로 이 공연의 좌석을 한 개만 예매할 수 있습니다.
-
-테스트용 사용자 ID로 `user-123`과 `user-456`을 사용할 수 있습니다.
-
-## 동시 요청과 저장
-
-- 서버는 임시 점유, 취소, 예매 완료 요청을 FIFO 큐에서 한 건씩 처리합니다. 같은 좌석에 동시에 요청이 들어오면 유효한 점유는 한 건만 발급됩니다.
-- 임시 점유는 메모리에 저장합니다. 예매가 완료되면 전체 예매 내역을 임시 JSON 파일에 쓰고 `fsync`한 뒤 `reservations.json`을 교체합니다. 저장이 성공하면 완료 응답을 반환합니다.
-- 저장 서버를 재시작하면 JSON에서 완료된 예매를 복원합니다. 임시 점유는 해제됩니다.
-
-## RESP2 명령
-
-TCP 서버는 아래 명령의 각 항목을 bulk string 배열로 받습니다.
-
-| 명령 | 성공 응답 |
+| 명령 | 응답 |
 | --- | --- |
-| `GET seat:1` | 좌석 번호와 가격 배열. 예시 `["1", 50000]` |
-| `GET seats:reserved` | 임시 점유 중이거나 예매 완료된 좌석 번호 배열 |
-| `HOLD user-123 1` | 임시 점유 토큰, 좌석 번호, 가격, 남은 밀리초 |
-| `GET hold:<token>` | 기존 임시 점유 정보와 남은 시간 |
-| `CANCEL <token>` | 임시 점유 해제 후 `+OK` |
-| `SET queue:<token> <name> <birth_date> <phone>` | 예매 정보 저장 후 `+OK` |
-| `GET reservations:user-123` | 예매가 완료된 좌석 번호 배열 |
+| `SET key value` | `+OK` (기존 값 덮어쓰기) |
+| `GET key` | bulk string, 없는 키는 null bulk string |
+| `DEL key [key ...]` | 실제 삭제한 키 개수 (중복 키는 한 번만 계산) |
+
+명령 이름은 대소문자를 구분하지 않습니다. 키와 값은 바이너리이며 빈 값과
+빈 키도 허용합니다. 키 접두어는 특별한 의미가 없습니다. 잘못된 인자와
+지원하지 않는 명령은 RESP 오류를 반환합니다. 클라이언트 간 데이터는 공유하고,
+서버를 재시작하면 메모리 데이터는 사라집니다.
+
+## 라이브러리 API
+
+```python
+import asyncio
+from mini_redis import KeyValueStore, start_server
+
+async def main():
+    store = KeyValueStore()
+    async with start_server(store.execute, host="127.0.0.1", port=6380) as server:
+        await server.serve_forever()
+
+asyncio.run(main())
+```
+
+`start_server(handler, host, port)`는 비동기 RESP 핸들러를 받는 async context
+manager입니다. 컨텍스트 진입 후 접속할 수 있으며, `port=0`이면 `server.port`로
+할당된 포트를 확인합니다. 종료 시 리스너와 열린 클라이언트도 정리합니다.
+
+`mini_redis`는 RESP 타입, `encode`, `read_value`도 공개합니다. RESP2의 simple
+string, error, signed 64-bit integer, binary bulk string, null, 중첩 배열을
+처리합니다. 디코더는 루트 기준 깊이 128 초과를 거부합니다.
 
 ## 테스트
 
-의존성과 Chrome을 설치한 뒤 저장소 루트에서 실행합니다. Chrome 실행 파일을 직접 지정하려면 `CHROME_PATH` 환경 변수를 사용합니다.
-
-```powershell
-python -B tests/seat-lookup/test_seat_lookup.py
-python -B tests/seat-booking/run.py
+```sh
+python -B -S -m unittest discover -s tests -v
 ```
 
-| 테스트 묶음 | 건수 | 검증 범위 |
-| --- | ---: | --- |
-| 좌석 조회 | 6 | 가격 조회, 예매 상태 재확인, 좌석 갱신, 재선택 차단 |
-| 예매 | 30 | 동시 점유, 취소, 완료·저장 실패, 예매 내역, 만료와 서버 재시작 |
+메모리 저장소, 실제 TCP 연결과 파이프라이닝, 연결 종료, 잘못된 프레임,
+바이너리 데이터, RESP 경계와 외부 패키지 없는 독립 실행을 검증합니다.
 
-테스트는 실제 브라우저와 서버를 실행하고 임시 예매 파일을 사용합니다. 5분 만료는 테스트 시계를 이동해 확인합니다.
+## 범위
+
+이 저장소는 KV/RESP/TCP 코어만 포함합니다. 예매 정책, HTTP 서버, 웹 화면,
+React 런타임과 응용 데이터 저장 코드는 포함하지 않습니다.
+전체 Redis 호환 서버는 아니며 TTL, RESP3, 인증, 트랜잭션, Pub/Sub,
+영속 저장과 클러스터링은 지원하지 않습니다.

@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass
-from typing import TypeAlias, Union
+from typing import TypeAlias
 
 
 class RespProtocolError(ValueError):
@@ -17,7 +17,7 @@ class RespError:
     message: str
 
 
-RespValue: TypeAlias = Union[RespSimple, RespError, int, bytes, list["RespValue"], None]
+RespValue: TypeAlias = RespSimple | RespError | int | bytes | list["RespValue"] | None
 
 
 async def _read_line(reader: asyncio.StreamReader) -> bytes:
@@ -35,8 +35,8 @@ def _integer(value: bytes) -> int:
 
 
 async def _read_value(reader: asyncio.StreamReader, prefix: bytes, depth: int) -> RespValue:
-    if depth > 1:
-        raise RespProtocolError("Nested arrays are not used by the ticket protocol")
+    if depth > 128:
+        raise RespProtocolError("RESP nesting limit exceeded")
     if prefix not in (b"+", b"-", b":", b"$", b"*"):
         raise RespProtocolError("Unsupported RESP prefix")
     line = await _read_line(reader)
@@ -46,6 +46,8 @@ async def _read_value(reader: asyncio.StreamReader, prefix: bytes, depth: int) -
         return RespError(line.decode("utf-8"))
     length = _integer(line)
     if prefix == b":":
+        if not -(2**63) <= length < 2**63:
+            raise RespProtocolError("RESP integer out of range")
         return length
     if length == -1:
         return None
@@ -79,6 +81,8 @@ def encode(value: RespValue) -> bytes:
     if isinstance(value, bytes):
         return f"${len(value)}\r\n".encode("ascii") + value + b"\r\n"
     if isinstance(value, int):
+        if not -(2**63) <= value < 2**63:
+            raise ValueError("RESP integer out of range")
         return f":{value}\r\n".encode("ascii")
     if isinstance(value, list):
         return f"*{len(value)}\r\n".encode("ascii") + b"".join(encode(item) for item in value)
