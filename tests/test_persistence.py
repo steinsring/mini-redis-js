@@ -1,6 +1,9 @@
 """RDB/AOF 백업과 재시작 복구 테스트."""
 
 import asyncio
+import contextlib
+import fcntl
+import io
 import os
 import signal
 import socket
@@ -11,8 +14,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import persistence
+import Redis
 from db import POLICY_LRU
-from persistence import Aof, PersistenceError, load_rdb, read_aof, save_rdb
+from persistence import FSYNC_ALWAYS, FSYNC_EVERYSEC, Aof, PersistenceError, load_rdb, read_aof, save_rdb
 from resp import RespClient, encode_command
 from tests.helpers import ServerTestCase
 
@@ -58,6 +63,38 @@ class RdbFileTest(unittest.TestCase):
 
         with self.assertRaises(OSError):
             save_rdb(self.path, failing_records())
+        self.assertEqual(load_rdb(self.path), RECORDS)
+        self.assertEqual([p.name for p in self.path.parent.iterdir()], ["dump.rdb"])
+
+    def test_save_syncs_the_new_data_before_the_rename_and_the_directory_after(self):
+        save_rdb(self.path, RECORDS[:1])
+        seen = []
+
+        def observe(fd: int) -> None:
+            temp_sizes = [p.stat().st_size for p in self.path.parent.iterdir() if p != self.path]
+            seen.append((temp_sizes, load_rdb(self.path)))
+
+        # os.fsync를 직접 부르면 macOS에서 장치 캐시까지 내려가지 않으므로 반드시 sync_file을 거쳐야 한다.
+        with mock.patch("persistence.sync_file", side_effect=observe), mock.patch("os.fsync") as plain:
+            save_rdb(self.path, RECORDS)
+        plain.assert_not_called()
+        final_size = self.path.stat().st_size
+        # 첫 번째: 새 내용을 다 쓴 임시 파일이 있고 원래 파일은 아직 옛 내용이다. 두 번째: 이름 변경이 끝났다.
+        self.assertEqual(seen, [([final_size], RECORDS[:1]), ([], RECORDS)])
+
+    def test_failed_data_sync_keeps_previous_file_and_leaves_no_temp_file(self):
+        save_rdb(self.path, RECORDS[:1])
+        with mock.patch("persistence.sync_file", side_effect=OSError("io error")):
+            with self.assertRaises(OSError):
+                save_rdb(self.path, RECORDS)
+        self.assertEqual(load_rdb(self.path), RECORDS[:1])
+        self.assertEqual([p.name for p in self.path.parent.iterdir()], ["dump.rdb"])
+
+    def test_failed_directory_sync_is_raised_and_leaves_a_readable_file(self):
+        save_rdb(self.path, RECORDS[:1])
+        with mock.patch("persistence.sync_file", side_effect=[None, OSError("io error")]):
+            with self.assertRaises(OSError):
+                save_rdb(self.path, RECORDS)
         self.assertEqual(load_rdb(self.path), RECORDS)
         self.assertEqual([p.name for p in self.path.parent.iterdir()], ["dump.rdb"])
 
@@ -107,6 +144,66 @@ class AofFileTest(unittest.TestCase):
         self.path.write_bytes(self.path.read_bytes() + b"garbage\r\n" + encode_command("PING"))
         with self.assertRaises(PersistenceError):
             list(read_aof(self.path))
+
+    def test_everysec_syncs_only_when_asked_and_only_if_something_was_appended(self):
+        with mock.patch("persistence.sync_file") as sync:
+            aof = Aof(self.path)  # 기본값은 everysec
+            self.addCleanup(aof.close)
+            aof.append([b"SET", b"k", b"v"])
+            aof.append([b"SET", b"k", b"w"])
+            self.assertEqual(sync.call_count, 0)
+            aof.fsync()
+            self.assertEqual(sync.call_count, 1)
+            aof.fsync()  # 새로 쓴 것이 없으면 다시 내리지 않는다
+            self.assertEqual(sync.call_count, 1)
+
+    def test_always_syncs_each_append_after_the_command_reached_the_file(self):
+        sizes_at_sync = []
+        with mock.patch("persistence.sync_file", side_effect=lambda fd: sizes_at_sync.append(os.fstat(fd).st_size)):
+            aof = Aof(self.path, FSYNC_ALWAYS)
+            self.addCleanup(aof.close)
+            aof.append([b"SET", b"k", b"v"])
+            first = len(encode_command("SET", "k", "v"))
+            self.assertEqual(sizes_at_sync, [first])
+            aof.append([b"DEL", b"k"])
+            self.assertEqual(sizes_at_sync, [first, first + len(encode_command("DEL", "k"))])
+            aof.fsync()  # 이미 명령마다 내렸으므로 주기 작업이 할 일이 없다
+            self.assertEqual(len(sizes_at_sync), 2)
+
+    def test_always_sync_failure_is_raised_to_the_caller(self):
+        aof = Aof(self.path, FSYNC_ALWAYS)
+        self.addCleanup(aof.close)
+        with mock.patch("persistence.sync_file", side_effect=OSError("io error")):
+            with self.assertRaises(OSError):
+                aof.append([b"SET", b"k", b"v"])
+
+    def test_unknown_fsync_policy_is_rejected(self):
+        for bad in ("none", "ALWAYS", ""):
+            with self.assertRaises(ValueError):
+                Aof(self.path, bad)
+
+    def test_explicit_everysec_is_the_same_as_default(self):
+        with mock.patch("persistence.sync_file") as sync:
+            aof = Aof(self.path, FSYNC_EVERYSEC)
+            self.addCleanup(aof.close)
+            aof.append([b"SET", b"k", b"v"])
+            self.assertEqual(sync.call_count, 0)
+
+    @unittest.skipUnless(sys.platform == "darwin", "F_FULLFSYNC는 macOS에만 있다")
+    def test_sync_file_flushes_the_drive_cache_on_macos(self):
+        with open(self.path, "wb") as file:
+            with mock.patch("fcntl.fcntl") as full, mock.patch("os.fsync") as plain:
+                persistence.sync_file(file.fileno())
+            full.assert_called_once_with(file.fileno(), fcntl.F_FULLFSYNC)
+            plain.assert_not_called()
+            persistence.sync_file(file.fileno())  # 실제 호출도 오류 없이 끝난다
+
+    @unittest.skipIf(sys.platform == "darwin", "macOS가 아닌 곳의 동작")
+    def test_sync_file_uses_fsync_elsewhere(self):
+        with open(self.path, "wb") as file:
+            with mock.patch("os.fsync") as plain:
+                persistence.sync_file(file.fileno())
+            plain.assert_called_once_with(file.fileno())
 
 
 class RdbRecoveryTest(ServerTestCase):
@@ -276,6 +373,15 @@ class AofRecoveryTest(ServerTestCase):
         await self.client.call("SET", "b", "2")
         self.assertEqual(list(read_aof(aof_path)), [[b"SET", b"b", b"2"]])  # RDB 이후의 변경만 남는다
 
+    async def test_save_that_could_not_be_synced_does_not_empty_the_aof(self):
+        await self.client.call("SET", "k", "v")
+        for failure in (OSError("io error"), [None, OSError("io error")]):  # 데이터 / 디렉터리 내리기 실패
+            with mock.patch("persistence.sync_file", side_effect=failure):
+                await self.assert_error("ERR save failed", "SAVE")
+            self.assertEqual(list(read_aof(self.dir / "appendonly.aof")), [[b"SET", b"k", b"v"]])
+        await self.restart(graceful=False)
+        self.assertEqual(await self.client.call("GET", "k"), b"v")
+
     async def test_recovery_loads_rdb_then_replays_later_changes_from_aof(self):
         await self.client.call("SET", "k", "in-rdb")
         await self.client.call("SET", "only-in-rdb", "x")
@@ -364,6 +470,100 @@ class AofRecoveryTest(ServerTestCase):
         await self.restart(graceful=False, maxmemory=500, maxmemory_policy=POLICY_LRU)
         for i in range(30):
             self.assertEqual(await self.client.call("GET", f"key:{i:02}"), (f"{i:02}" * 40).encode())
+
+
+class AppendFsyncTest(ServerTestCase):
+    """AOF를 디스크에 내리는 시점: everysec(기본)은 1초마다, always는 응답 전에 명령마다."""
+
+    config = {"appendonly": True}
+
+    async def test_default_is_everysec_and_reply_does_not_wait_for_sync(self):
+        self.assertEqual(self.server.config.appendfsync, FSYNC_EVERYSEC)
+        with mock.patch("persistence.sync_file") as sync:
+            self.assertEqual(await self.client.call("SET", "k", "v"), "OK")
+            self.assertEqual(sync.call_count, 0)
+
+    async def test_everysec_syncs_from_the_periodic_task(self):
+        with mock.patch("Redis.CRON_INTERVAL", 0.01):
+            await self.restart()
+            with mock.patch("persistence.sync_file") as sync:
+                await self.client.call("SET", "k", "v")
+                await self.eventually(lambda: sync.call_count == 1)
+
+    async def test_always_syncs_once_per_write_before_replying(self):
+        await self.restart(appendfsync=FSYNC_ALWAYS)
+        with mock.patch("persistence.sync_file") as sync:
+            self.assertEqual(await self.client.call("SET", "k", "v"), "OK")
+            self.assertEqual(sync.call_count, 1)
+            self.assertEqual(await self.client.call("INCR", "n"), 1)
+            self.assertEqual(sync.call_count, 2)
+            self.assertEqual(await self.client.call("DEL", "k", "n"), 2)
+            self.assertEqual(sync.call_count, 3)
+
+    async def test_always_does_not_sync_for_commands_that_change_nothing(self):
+        await self.restart(appendfsync=FSYNC_ALWAYS)
+        await self.client.call("SET", "k", "text")
+        with mock.patch("persistence.sync_file") as sync:
+            await self.client.call("GET", "k")
+            await self.client.call("TTL", "k")
+            self.assertIsNone(await self.client.call("SET", "k", "other", "NX"))  # 조건 불일치
+            self.assertEqual(await self.client.call("DEL", "missing"), 0)
+            self.assertEqual(await self.client.call("EXPIRE", "missing", "10"), 0)
+            await self.assert_error("ERR", "INCR", "k")  # 실패한 명령
+            self.assertEqual(sync.call_count, 0)
+
+    async def test_always_sync_failure_is_reported_and_memory_state_is_defined(self):
+        await self.restart(appendfsync=FSYNC_ALWAYS)
+        with mock.patch("persistence.sync_file", side_effect=OSError("io error")):
+            with self.assertLogs("mini-redis", level="ERROR"):
+                await self.assert_error("MISCONF", "SET", "k", "v")
+        self.assertEqual(await self.client.call("GET", "k"), b"v")  # AOF 쓰기 실패와 같은 문서화된 동작
+        self.assertEqual(await self.client.call("SET", "k", "again"), "OK")  # 장애가 풀리면 다시 정상
+
+    async def test_always_recovers_every_acknowledged_write_after_crash(self):
+        await self.restart(appendfsync=FSYNC_ALWAYS)
+        for i in range(20):
+            await self.client.call("SET", f"key:{i}", i)
+        await self.client.call("INCRBY", "n", "7")
+        await self.client.call("DEL", "key:0")
+        await self.restart(graceful=False, appendfsync=FSYNC_ALWAYS)
+        self.assertIsNone(await self.client.call("GET", "key:0"))
+        for i in range(1, 20):
+            self.assertEqual(await self.client.call("GET", f"key:{i}"), str(i).encode())
+        self.assertEqual(await self.client.call("GET", "n"), b"7")
+
+    async def test_always_keeps_working_after_save_truncates_the_log(self):
+        await self.restart(appendfsync=FSYNC_ALWAYS)
+        await self.client.call("SET", "before", "1")
+        await self.client.call("SAVE")
+        await self.client.call("SET", "after", "2")
+        self.assertEqual(list(read_aof(self.dir / "appendonly.aof")), [[b"SET", b"after", b"2"]])
+        await self.restart(graceful=False, appendfsync=FSYNC_ALWAYS)
+        self.assertEqual(await self.client.call("GET", "before"), b"1")
+        self.assertEqual(await self.client.call("GET", "after"), b"2")
+
+    async def test_unknown_policy_stops_startup(self):
+        await self.server.stop()
+        self.servers.remove(self.server)
+        server = Redis.RedisServer(Redis.Config(port=0, dir=self.dir, appendonly=True, appendfsync="none"))
+        with self.assertRaises(ValueError):
+            await server.start()
+
+
+class OptionParsingTest(unittest.TestCase):
+    def parse(self, *argv: str) -> Redis.Config:
+        with mock.patch("sys.argv", ["Redis.py", *argv]):
+            return Redis._parse_args()
+
+    def test_appendfsync_defaults_to_everysec(self):
+        self.assertEqual(self.parse("--appendonly").appendfsync, FSYNC_EVERYSEC)
+
+    def test_appendfsync_always_is_accepted(self):
+        self.assertEqual(self.parse("--appendonly", "--appendfsync", "always").appendfsync, FSYNC_ALWAYS)
+
+    def test_unknown_appendfsync_value_is_rejected(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.parse("--appendonly", "--appendfsync", "none")
 
 
 class KillRecoveryTest(unittest.IsolatedAsyncioTestCase):

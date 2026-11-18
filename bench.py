@@ -43,8 +43,15 @@ async def _worker(client: RespClient, start: float, interval: float, count: int,
         stats["total"] += 1
         if not ok:
             stats["errors"] += 1
-        elif is_get:
-            stats["get_ms"].append((time.perf_counter() - scheduled) * 1000)
+        else:
+            stats["get_ms" if is_get else "set_ms"].append((time.perf_counter() - scheduled) * 1000)
+
+
+def _summary(latencies: list[float]) -> tuple[float, float, float, float]:
+    """정렬된 지연 시간에서 (p50, p95, p99, 최대)를 뽑는다. 비어 있으면 안 된다."""
+    last = len(latencies) - 1
+    p50, p95, p99 = (latencies[min(last, int(len(latencies) * q))] for q in (0.50, 0.95, 0.99))
+    return p50, p95, p99, latencies[-1]
 
 
 async def _run(args: argparse.Namespace) -> bool:
@@ -52,7 +59,7 @@ async def _run(args: argparse.Namespace) -> bool:
     for i in range(KEYS):
         await clients[0].call("SET", f"bench:{i}", VALUE)
 
-    stats: dict = {"total": 0, "errors": 0, "get_ms": []}
+    stats: dict = {"total": 0, "errors": 0, "get_ms": [], "set_ms": []}
     per_connection = args.rate * args.duration // args.connections
     interval = args.connections / args.rate
     started = time.perf_counter()
@@ -67,15 +74,19 @@ async def _run(args: argparse.Namespace) -> bool:
     for client in clients:
         await client.close()
 
-    latencies = sorted(stats["get_ms"])
-    if not latencies:
+    get_ms, set_ms = sorted(stats["get_ms"]), sorted(stats["set_ms"])
+    if not get_ms:
         print("성공한 조회가 없어 측정할 수 없다")
         return False
-    p50, p95, p99 = (latencies[min(len(latencies) - 1, int(len(latencies) * q))] for q in (0.50, 0.95, 0.99))
     throughput = stats["total"] / elapsed
     error_rate = stats["errors"] / stats["total"]
     print(f"요청 {stats['total']}건 / {elapsed:.1f}초 = 초당 {throughput:.0f}건 (목표 {args.rate})")
-    print(f"조회 지연 p50 {p50:.2f}ms, p95 {p95:.2f}ms, p99 {p99:.2f}ms, 최대 {latencies[-1]:.2f}ms")
+    # 통과 여부는 요구사항대로 조회만 보지만, AOF처럼 쓰기에만 드는 비용은 조회 지연에 잘 드러나지 않으므로
+    # 저장과 전체 요청의 지연도 함께 보여 준다.
+    for name, latencies in (("전체", sorted(get_ms + set_ms)), ("조회", get_ms), ("저장", set_ms)):
+        if latencies:
+            print(f"{name} 지연 p50 %.2fms, p95 %.2fms, p99 %.2fms, 최대 %.2fms" % _summary(latencies))
+    p95 = _summary(get_ms)[1]
     print(f"오류율 {error_rate:.3%} ({stats['errors']}건)")
     passed = throughput >= args.rate * 0.99 and p95 <= args.p95_ms and error_rate <= args.max_error_rate
     print("결과:", "통과" if passed else "미달")

@@ -20,7 +20,16 @@ from pathlib import Path
 
 from commands import CommandExecutor
 from db import POLICY_LRU, POLICY_NOEVICTION, Database, OutOfMemory, now_ms
-from persistence import Aof, PersistenceError, SwapStore, load_rdb, read_aof, save_rdb
+from persistence import (
+    FSYNC_ALWAYS,
+    FSYNC_EVERYSEC,
+    Aof,
+    PersistenceError,
+    SwapStore,
+    load_rdb,
+    read_aof,
+    save_rdb,
+)
 from resp import ProtocolError, error, parse_command
 
 log = logging.getLogger("mini-redis")
@@ -44,6 +53,7 @@ class Config:
     maxmemory_policy: str = POLICY_NOEVICTION
     dir: Path = field(default_factory=lambda: Path("data"))
     appendonly: bool = False
+    appendfsync: str = FSYNC_EVERYSEC  # AOF를 디스크에 내리는 시점. FSYNC_ALWAYS면 명령마다.
     save_interval: float = 60.0  # 변경이 있을 때 RDB를 저장하는 주기(초). 0이면 자동 저장 안 함.
     max_key_size: int = 1024
     max_value_size: int = 1024 * 1024
@@ -157,7 +167,7 @@ class RedisServer:
         finally:
             self.db.loading = False
         if self.config.appendonly:
-            self.commands.aof = Aof(aof_path)
+            self.commands.aof = Aof(aof_path, self.config.appendfsync)
         elif aof_exists:
             # AOF를 끈 채로 시작했는데 이전 실행의 기록이 남아 있다. 방금 재생한 내용을 RDB로
             # 옮기고 파일을 없앤다. 남겨 두면 나중에 AOF를 다시 켰을 때 그 사이 저장된 RDB 위에
@@ -270,6 +280,12 @@ def _parse_args() -> Config:
     )
     parser.add_argument("--dir", type=Path, default=defaults.dir, help="RDB/AOF/스왑 파일 디렉터리")
     parser.add_argument("--appendonly", action="store_true", help="AOF 사용")
+    parser.add_argument(
+        "--appendfsync",
+        choices=[FSYNC_EVERYSEC, FSYNC_ALWAYS],
+        default=defaults.appendfsync,
+        help="AOF를 디스크에 내리는 시점: 1초마다 또는 명령마다",
+    )
     parser.add_argument("--save-interval", type=float, default=defaults.save_interval, help="초. 0이면 자동 RDB 저장 안 함")
     parser.add_argument("--max-key-size", type=int, default=defaults.max_key_size)
     parser.add_argument("--max-value-size", type=int, default=defaults.max_value_size)
